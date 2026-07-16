@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Docs
+docs/_build/
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Local secrets
+.env
+
+# Local / agent working files — never commit or publish
+.claude/settings.local.json
+memory/
