@@ -10,6 +10,8 @@ venv/
 
 # Docs
 docs/_build/
+# Examples gallery — generated at build time from examples/ by docs/_ext/examples_gallery.py
+docs/examples/
 
 # Tooling
 .pytest_cache/

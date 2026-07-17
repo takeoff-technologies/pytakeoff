@@ -18,7 +18,11 @@ original control points exactly. Nothing is saved to disk.
 
 from pytakeoff import TakeoffClient
 
-API_KEY = "tk_xxxxxxxx_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"  # get a key in the GUI (Account -> API Keys) or run: python -m pytakeoff
+# Ran `python -m pytakeoff`? Leave this line exactly as it is: the all-x
+# placeholder counts as no key, so your saved credentials (or the
+# TAKEOFF_API_KEY env var) are used automatically.
+# Otherwise, paste your own key here - GUI: Account -> API Keys.
+API_KEY = "tk_xxxxxxxx_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
 with TakeoffClient(api_key=API_KEY) as client:
     # Use the project open in your session, or your most recent one if none is

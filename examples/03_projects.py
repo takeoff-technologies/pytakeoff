@@ -8,7 +8,11 @@ if your browser has a project open, ``projects.current()`` returns it.
 
 from pytakeoff import TakeoffClient
 
-API_KEY = "tk_xxxxxxxx_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"  # get a key in the GUI (Account -> API Keys) or run: python -m pytakeoff
+# Ran `python -m pytakeoff`? Leave this line exactly as it is: the all-x
+# placeholder counts as no key, so your saved credentials (or the
+# TAKEOFF_API_KEY env var) are used automatically.
+# Otherwise, paste your own key here - GUI: Account -> API Keys.
+API_KEY = "tk_xxxxxxxx_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
 with TakeoffClient(api_key=API_KEY) as client:
     projects = client.projects.list()

@@ -138,33 +138,6 @@ opt.restore("1")              # reload a stored run; opt.runs(), opt.delete_runs
 
 Objective `func` is `"minCd"`, `"maxCl"`, `"maxGlide"`, or any `min<var>`/`max<var>` over the polar variables; `solve_for` is `"fixed"`, `"alpha"` (hit `target_Cl`), or `"flap"`.
 
-## Every command, not just the facade
-
-The facade (`client.projects`, `Project`) covers the common workflows. Everything else goes through the generic escape hatch — any of the server's registered commands can be called directly:
-
-```python
-client.call("wing_set_span", wing={"id": wing_id}, span=1.25)
-client.call("run_simulation", entity_id=sim_id, on_progress=print, timeout=None)
-```
-
-Discover what the server offers (fetched live, always in sync with the server version):
-
-```python
-commands = client.commands()          # {name: {description, credit cost, ...}}
-print(sorted(commands))
-```
-
-## Server-initiated events
-
-The server pushes broadcasts (saves by collaborators, property updates, job progress). Subscribe with:
-
-```python
-client.on("project_saved", lambda msg: print("saved:", msg))
-client.on("*", lambda msg: ...)  # everything
-```
-
-Handlers run while a `call()` is waiting for its response — keep them fast and don't issue new commands from inside one.
-
 ## Error handling
 
 ```python
@@ -174,7 +147,7 @@ from pytakeoff import (
 )
 
 try:
-    client.call("run_optimization", entity_id=opt_id, timeout=3600)
+    opt.run(timeout=3600)                         # any high-level call can raise these
 except RateLimited as e:
     time.sleep(e.retry_after)                 # server throttled us; wait and retry
 except GuiSessionActive:

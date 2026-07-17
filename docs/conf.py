@@ -5,6 +5,8 @@ import sys
 
 # Make the package importable for autodoc (docs/ is one level below the root).
 sys.path.insert(0, os.path.abspath("../src"))
+# Local extensions (examples_gallery).
+sys.path.insert(0, os.path.abspath("_ext"))
 
 from pytakeoff import __version__  # noqa: E402
 
@@ -22,6 +24,8 @@ extensions = [
     "sphinx.ext.intersphinx",   # link to the stdlib / requests docs
     "sphinx.ext.viewcode",      # add [source] links
     "myst_parser",              # write narrative pages in Markdown
+    "sphinx_copybutton",        # copy button on every code block
+    "examples_gallery",         # build the examples pages from examples/
 ]
 
 templates_path = ["_templates"]
