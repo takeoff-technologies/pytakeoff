@@ -12,24 +12,34 @@ pip install pytakeoff
 
 ## Authentication — API keys, never passwords
 
-Scripts authenticate with an **API key**. Get one either way:
+Scripts authenticate with an **API key** — a token shaped like
+`tk_<id>_<secret>`, never your password. Get one either way:
 
 - **In the GUI:** Account → API Keys → Generate API key (shown once — copy it).
 - **From the terminal (one-time interactive setup):**
 
   ```bash
-  python -c "from pytakeoff import TakeoffClient; TakeoffClient.setup()"
+  python -m pytakeoff             # create a NEW key (asks for your password) and save it
+  python -m pytakeoff configure   # save a key you ALREADY made in the GUI (paste it)
   ```
 
-  This asks for your username/password **once**, creates a key over a single
-  request, and prints it (shown only once — copy it). The password is never
-  stored.
+  The first form asks for your username/password **once**, creates a key over a
+  single request, and saves it to `~/.takeoff/credentials`. The password is
+  never stored.
 
-`TakeoffClient` resolves the key from the `api_key=` argument, the
-`TAKEOFF_API_KEY` environment variable (recommended for CI), or an optional
-`~/.takeoff/credentials` file — in that order. **Never commit a key to a
-repository.** Leaked a key? Revoke it in the GUI; your password and other
-keys are unaffected.
+Once saved, no key in your code — `TakeoffClient()` picks it up:
+
+```python
+from pytakeoff import TakeoffClient
+
+with TakeoffClient() as client:          # key read from your saved credentials
+    print(client.username)
+```
+
+`TakeoffClient` resolves the key, in order, from the `api_key=` argument, the
+`TAKEOFF_API_KEY` environment variable (recommended for CI), or your saved
+`~/.takeoff/credentials` file. **Never commit a key to a repository.** Leaked a
+key? Revoke it in the GUI; your password and other keys are unaffected.
 
 ## Quickstart
 
