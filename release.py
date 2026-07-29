@@ -16,7 +16,9 @@ Maintainer tool - not shipped (the sdist allowlist and wheel packages exclude it
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -38,11 +40,12 @@ class Abort(SystemExit):
 def run(*args: str, capture: bool = True, check: bool = True) -> str:
     """Run a command. Honours --dry-run for anything that mutates state."""
     reads_only = "--list" in args  # `git tag --list` must still run under --dry-run
+    is_gh = Path(args[0]).stem.lower() == "gh"  # args[0] may be a full path to gh.exe
     mutating = not reads_only and (
         args[:2] in {
             ("git", "commit"), ("git", "push"), ("git", "tag"), ("git", "add"),
         }
-        or args[0] == "gh"
+        or is_gh
     )
     if DRY_RUN and mutating:
         print(f"    [dry-run] {' '.join(args)}")
@@ -85,14 +88,28 @@ def bump(version: str, part: str) -> str:
     return f"{major}.{minor}.{patch + 1}"
 
 
-def have_gh() -> bool:
-    try:
-        return subprocess.run(
-            ["gh", "--version"], capture_output=True,
-            shell=(sys.platform == "win32"),
-        ).returncode == 0
-    except OSError:
-        return False
+def gh_path() -> str | None:
+    """Locate the GitHub CLI.
+
+    shutil.which, not `subprocess.run(["gh", ...], shell=True)` - on Windows that
+    combination is unreliable and reported gh missing on machines that had it.
+    Falls back to the default install locations for a shell whose PATH predates
+    the install.
+    """
+    found = shutil.which("gh")
+    if found:
+        return found
+    for candidate in (
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "GitHub CLI" / "gh.exe",
+        Path(os.environ.get("ProgramFiles(x86)", "")) / "GitHub CLI" / "gh.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "GitHub CLI" / "gh.exe",
+    ):
+        try:
+            if candidate.is_file():
+                return str(candidate)
+        except OSError:
+            continue
+    return None
 
 
 def repo_slug() -> str:
@@ -194,7 +211,7 @@ def ask_notes(log: str) -> str:
 
 
 def show_plan(current: str, new: str, tag: str, part: str, notes: str,
-              gh_ready: bool) -> None:
+              gh: str | None) -> None:
     print(f"\n{RULE}\n  About to release\n{RULE}")
     print(f"    version    {current}  ->  {new}   ({part})")
     print(f"    tag        {tag}")
@@ -206,11 +223,12 @@ def show_plan(current: str, new: str, tag: str, part: str, notes: str,
     print(f"      2. set __version__ = \"{new}\"")
     print(f"      3. commit and push to origin/{BRANCH}")
     print(f"      4. create and push tag {tag}")
-    if gh_ready:
+    if gh:
         print("      5. publish the GitHub Release  ->  triggers the PyPI upload")
     else:
-        print("      5. SKIP the GitHub Release (gh not installed)")
+        print("      5. SKIP the GitHub Release - the GitHub CLI was not found")
         print("         nothing reaches PyPI until you publish it in the browser")
+        print("         (install: winget install --id GitHub.cli, then reopen the shell)")
     print("\n    then, with no action from you:")
     print("      - PyPI       the publish workflow builds and uploads")
     print("      - Read the Docs  rebuilds latest, stable follows the new tag")
@@ -271,8 +289,8 @@ def main() -> int:
         notes = ask_notes(log)
     notes = notes or f"pytakeoff {new}"
 
-    gh_ready = have_gh()
-    show_plan(current, new, tag, part, notes, gh_ready)
+    gh = gh_path()
+    show_plan(current, new, tag, part, notes, gh)
 
     if DRY_RUN:
         print("\n  -- dry run: nothing below actually happens --")
@@ -296,16 +314,16 @@ def main() -> int:
     run("git", "tag", "-a", tag, "-m", f"pytakeoff {new}")
     run("git", "push", "origin", tag)
 
-    if gh_ready:
+    if gh:
         print("  publishing the GitHub Release (this triggers PyPI)")
-        run("gh", "release", "create", tag,
+        run(gh, "release", "create", tag,
             "--title", f"pytakeoff {new}", "--notes", notes)
 
     if DRY_RUN:
         print("\n  dry run complete - nothing was changed\n")
         return 0
 
-    if gh_ready:
+    if gh:
         print(
             f"\n  Released {new}.\n"
             f"    workflow   gh run watch\n"
