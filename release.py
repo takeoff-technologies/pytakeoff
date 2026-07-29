@@ -105,8 +105,10 @@ def repo_slug() -> str:
 def preflight() -> None:
     if run("git", "rev-parse", "--abbrev-ref", "HEAD") != BRANCH:
         raise Abort(f"not on {BRANCH}")
-    if run("git", "status", "--porcelain"):
-        raise Abort("working tree is dirty - commit or stash first")
+    # Tracked changes only: the release commits nothing but the version file, so
+    # untracked local files (CLAUDE.md, scratch scripts) must not block a release.
+    if run("git", "status", "--porcelain", "--untracked-files=no"):
+        raise Abort("you have uncommitted changes - commit or stash first")
     run("git", "fetch", "--quiet", "origin")
     local, remote = run("git", "rev-parse", "@"), run("git", "rev-parse", "@{u}")
     if local != remote:
