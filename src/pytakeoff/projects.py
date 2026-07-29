@@ -234,6 +234,50 @@ class Project:
         data = self.entity("FoilSection", id=id, name=name)
         return FoilSection(self._client, data)
 
+    def create_foil_section(
+        self,
+        name: Optional[str] = None,
+        *,
+        copy_from: Optional[str] = None,
+    ) -> FoilSection:
+        """Add a foil section to the project and return a handle to it.
+
+        The new section starts as the server's default (a clean NACA 0012), or
+        as a copy of an existing one::
+
+            section = project.create_foil_section()
+            section = project.create_foil_section("tip")
+            section = project.create_foil_section("tip_v2", copy_from=section.id)
+
+        The server names it (``foil_section_2``, ...) unless you pass ``name``,
+        which is applied as a rename right after creation. ``copy_from`` takes
+        the id of the section to duplicate.
+
+        .. warning::
+           Section names are **not** unique - the server accepts a second
+           section called ``tip`` without complaint. Identify sections by
+           ``id`` when it matters; :meth:`foil_section` with ``name=`` returns
+           an arbitrary one of the duplicates.
+        """
+        data: Dict[str, Any] = {}
+        if copy_from is not None:
+            data["copy_from"] = copy_from
+        created = self.create_entity("FoilSection", data)
+        section = FoilSection(self._client, created)
+
+        if name is not None and section.id is not None:
+            renamed = self.update_entity("FoilSection", {"id": section.id, "name": name})
+            section.name = renamed.get("name") or name
+        return section
+
+    def delete_foil_section(
+        self, name: Optional[str] = None, *, id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Remove a foil section by name or id."""
+        if name is None and id is None:
+            raise ValueError("Pass a foil section name or id=")
+        return self.delete_entity("FoilSection", id=id, name=name)
+
     def analysis_2d(self, **params: Any) -> Analysis2D:
         """A configured 2D polar analysis over the visible foil sections.
 

@@ -50,6 +50,20 @@ believes a browser is connected after one disconnected uncleanly.
 
 ## Foil sections
 
+```python
+sections = project.foil_sections()                     # handles for all of them
+section  = project.foil_section("tip")                 # one by name...
+section  = project.foil_section(id="…")                 # ...or by id
+section  = project.create_foil_section()                # new one (NACA 0012 default)
+section  = project.create_foil_section("tip")           # ...named
+section  = project.create_foil_section("tip_v2", copy_from=section.id)   # ...as a copy
+project.delete_foil_section(id=section.id)
+```
+
+Names are **not unique** — the server accepts a second section called `tip`
+without complaint, and `foil_section(name=...)` then returns an arbitrary one of
+them. Hold onto `section.id` whenever it matters.
+
 A {class}`~pytakeoff.FoilSection` has three groups of state, each with a **live
 getter** and a **parametric setter**:
 
