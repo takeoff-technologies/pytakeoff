@@ -49,9 +49,17 @@ class ProjectsAPI:
             raise
         return Project(self._client, data.get("name", ""), data)
 
-    def create(self, name: str, description: str = "") -> "Project":
-        """Create a new project and make it the current one."""
-        data = self._client.call("create_project", name=name, description=description)
+    def create(
+        self, name: str, description: str = "", *, force: bool = False
+    ) -> "Project":
+        """Create a new project and make it the current one.
+
+        Pass ``force=True`` to proceed even while a browser session is connected
+        on the same account — see :meth:`open` for what that means.
+        """
+        data = self._client.call(
+            "create_project", name=name, description=description, force=force
+        )
         return Project(self._client, name, data)
 
     def open(
@@ -60,6 +68,7 @@ class ProjectsAPI:
         *,
         id: Optional[str] = None,
         groups: Optional[List[str]] = None,
+        force: bool = False,
         on_progress: Optional[ProgressCallback] = None,
     ) -> "Project":
         """Load a project and make it the current one.
@@ -67,12 +76,16 @@ class ProjectsAPI:
         Identify it by ``name`` or by ``id=`` (the ``project_id`` from
         :meth:`list`). This is how a script sets the current project when
         nothing is open yet — you do **not** need the web app running. Restores
-        a draft automatically if one exists.
+        a draft automatically if one exists. The returned :class:`Project` is
+        bound to the now-current project, so you can work on it immediately.
 
-        (While your browser has a session open on the same account, switching
+        While your browser has a session open on the same account, switching
         projects from a script is refused with :class:`pytakeoff.GuiSessionActive`,
-        because the script and the GUI share one project — close the browser or
-        use :meth:`current` to work on whatever it already has open.)
+        because the script and the GUI share one server-side project. Either
+        close the browser, use :meth:`current` to work on whatever it already
+        has open, or pass ``force=True`` to take the session over — the GUI is
+        told to reload so it does not keep editing a project the server has
+        since replaced.
         """
         if name is None and id is None:
             raise ValueError("Pass a project name or id=")
@@ -85,11 +98,27 @@ class ProjectsAPI:
                     f"No project found with id {id!r}", command="load_project"
                 )
             name = match.get("name")
-        payload: Dict[str, Any] = {"name": name}
+        payload: Dict[str, Any] = {"name": name, "force": force}
         if groups is not None:
             payload["groups"] = groups
         data = self._client.call("load_project", payload, on_progress=on_progress)
         return Project(self._client, name, data)
+
+    def close(self, *, force: bool = False) -> Dict[str, Any]:
+        """Close the current project, leaving the session with none open.
+
+        Afterwards :meth:`current` returns ``None`` until you :meth:`open` or
+        :meth:`create` another one. ``force=True`` overrides the browser-session
+        guard — see :meth:`open`.
+        """
+        return self._client.call("close_project", {"force": force})
+
+    def delete(self, name: str, *, force: bool = False) -> Dict[str, Any]:
+        """Delete a project (moves it to the trash, as the web app does).
+
+        ``force=True`` overrides the browser-session guard — see :meth:`open`.
+        """
+        return self._client.call("delete_project", {"name": name, "force": force})
 
 
 class Project:

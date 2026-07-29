@@ -13,6 +13,8 @@ project = client.projects.open("my_foil")      # load one by name and make it cu
 project = client.projects.open(id="…")         # ...or by project_id (from projects.list())
 project = client.projects.create("draft")      # new project, made current
 project.save()                                 # persist (clears the unsaved-changes flag)
+client.projects.close()                        # leave the session with nothing open
+client.projects.delete("old_draft")            # move a project to the trash
 ```
 
 The server keeps **one session per user**, shared with the web app. `current()`
@@ -23,10 +25,26 @@ running on its own sets the current project itself:
 project = client.projects.current() or client.projects.open("my_foil")
 ```
 
-`projects.list()` returns every project (`name`, `project_id`, timestamps). While a
-browser session is open on the same account, switching projects from a script is
-refused ({class}`~pytakeoff.GuiSessionActive`) because the two share one project —
-work on `current()` instead, or close the browser.
+`projects.list()` returns every project (`name`, `project_id`, timestamps).
+
+Every fresh connection auto-loads your most recent project, so `current()` is
+rarely `None` at the start of a script even if a previous run called `close()`.
+Open the one you want explicitly rather than relying on what you inherit.
+
+### Switching projects while the web app is open
+
+`open`, `create`, `close` and `delete` replace or remove the project your browser
+is editing — the two share one server-side project — so while a browser session is
+live on the same account they raise {class}`~pytakeoff.GuiSessionActive`. Either
+work on `current()`, close the browser, or take the session over:
+
+```python
+project = client.projects.open("my_foil", force=True)
+```
+
+`force=True` proceeds and tells the web app to reload. Every override is logged
+server-side. It is also the way out of the rare case where the server still
+believes a browser is connected after one disconnected uncleanly.
 
 ---
 

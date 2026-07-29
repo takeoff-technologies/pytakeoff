@@ -76,6 +76,11 @@ class GuiSessionActive(CommandError):
 
     Project switching/closing commands are rejected while the same account has
     a live browser session, because the script and the GUI share one
-    server-side project. Close the browser tab or run the script without the
-    GUI open.
+    server-side project. Close the browser tab, run the script without the GUI
+    open, or pass ``force=True`` to the call to take the session over::
+
+        client.projects.open("MyProject2", force=True)
+
+    ``force=True`` also gets you out of the rare case where the server still
+    believes a browser is connected after one disconnected uncleanly.
     """

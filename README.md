@@ -151,7 +151,7 @@ try:
 except RateLimited as e:
     time.sleep(e.retry_after)                 # server throttled us; wait and retry
 except GuiSessionActive:
-    print("Close your browser session to switch projects from a script")
+    client.projects.open("my_foil", force=True)   # take the session over
 except CommandError as e:
     print("Server rejected:", e, e.payload)   # payload carries structured details
 except CommandTimeout:
@@ -163,7 +163,8 @@ except ConnectionClosed:
 ## Good to know
 
 - **Scripts are rate limited.** API-key connections have per-account command budgets (a per-minute cap, plus a tighter hourly cap on heavy commands like `run_simulation`/`run_optimization`), one heavy command in flight at a time, and a small cap on concurrent connections. Limits scale with your plan. The browser GUI is not affected. Hitting a limit raises `RateLimited` with `retry_after`.
-- **One session per user.** The server keeps a single session per account, shared between your scripts and your browser. While your GUI is open, entity edits from a script are allowed (the GUI shows a "Script connected" chip and can refresh), but project switching/closing commands raise `GuiSessionActive`.
+- **One session per user.** The server keeps a single session per account, shared between your scripts and your browser. While your GUI is open, entity edits from a script are allowed (the GUI shows a "Script connected" chip and can refresh), but `open`/`create`/`close`/`delete` raise `GuiSessionActive` because they replace the project the browser is editing. Pass `force=True` to take the session over — the web app is told to reload.
+- **Every connection auto-loads your last project.** `current()` is rarely `None` at the start of a script, even after a previous run called `close()`. Open the project you want explicitly rather than relying on what you inherit.
 - **Credits & permissions** apply exactly as in the web app; paid commands bill your account.
 - **Binary mesh data:** a few commands (`get_entity_mesh`, `get_simulation_visualization`, ...) answer with raw FlatBuffer bytes. `pytakeoff` returns them as a `FlatBufferResult` without decoding — most scripting workflows never need them.
 - **Long sessions:** session tokens expire after ~1 hour; if the connection drops, `client.reconnect()` re-exchanges your API key and reconnects.
