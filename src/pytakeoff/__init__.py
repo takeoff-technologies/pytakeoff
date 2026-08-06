@@ -36,7 +36,7 @@ from .optimizations import Optimization2D
 from .projects import Project, ProjectsAPI
 from .transport import FlatBufferResult
 
-__version__ = "0.1.3"
+__version__ = "0.2.0"
 
 __all__ = [
     "TakeoffClient",
