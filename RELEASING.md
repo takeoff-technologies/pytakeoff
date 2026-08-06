@@ -61,15 +61,19 @@ or press Enter to use them as-is:
       3. commit and push to origin/main
       4. create and push tag v0.1.2
       5. publish the GitHub Release  ->  triggers the PyPI upload
+      6. follow the workflow, then confirm the version on PyPI
 
     then, with no action from you:
-      - PyPI       the publish workflow builds and uploads
       - Read the Docs  rebuilds latest, stable follows the new tag
 
   Release 0.1.2? [y/N]
 ```
 
 Nothing happens until you answer `y`.
+
+Step 6 is why the script does not exit at "published": the Release is only the
+trigger, so a version that never gets built looks exactly like one that shipped.
+It waits for the run, streams it, then polls PyPI until the version is live.
 
 It refuses to start if you are not on `main`, the tree is dirty, `main` is out of
 sync with origin, or the tag already exists — and it aborts before touching
@@ -83,15 +87,15 @@ python release.py minor                          # skip question 1
 python release.py --set 1.0.0rc1                 # exact version
 python release.py patch --notes "Fix reconnect" --yes   # no prompts at all
 python release.py --skip-docs                    # do not build the docs first
+python release.py --no-wait                      # publish, do not follow it to PyPI
 ```
 
 ## After it finishes
 
-```powershell
-gh run watch                                    # the publish workflow
-```
+The script has already watched the workflow and confirmed PyPI, so there is
+normally nothing to check.
 
-- **PyPI** — <https://pypi.org/project/pytakeoff/> (a minute or two behind the workflow)
+- **PyPI** — <https://pypi.org/project/pytakeoff/>
 - **Docs** — <https://pytakeoff.readthedocs.io>
 
 Nothing to do for the docs. Read the Docs rebuilds `latest` from the push to
@@ -112,6 +116,30 @@ version type *Tag*, action **Activate version**. Applies to future tags only.
 
 PyPI needs no token — `publish.yml` uses Trusted Publishing (OIDC).
 
+## The Release published but PyPI stayed empty
+
+Almost always **latency, not failure**: GitHub queues the `release: published`
+event and can take a long time to turn it into a run — v0.2.0 waited 30 minutes.
+The release itself is complete (version bumped, pushed, tagged, Release out); the
+upload just has not happened yet. The script waits up to 30 minutes for the run
+before saying anything, and even then only reports where things stand.
+
+```powershell
+gh run list --workflow publish.yml       # has a run for the tag appeared?
+```
+
+If a run exists, wait for it — never re-fire, or the workflow runs twice and the
+second upload is rejected as a duplicate. If **no** run ever appears, the event
+really was dropped, and this re-sends it without touching the version or the tag:
+
+```powershell
+python release.py --republish
+```
+
+It refuses when the version is already on PyPI, watches a run that is already
+queued instead of duplicating it, and points you at the log if a run completed
+without publishing.
+
 ## If it goes wrong
 
 PyPI versions cannot be replaced or deleted, only yanked. Fix forward with a new
@@ -129,6 +157,9 @@ Yank on PyPI: **Manage project → Releases → Options → Yank**.
 
 - The workflow fires on **release published**, not on tag push. A tag alone
   publishes nothing.
+- That trigger is asynchronous and its delay is unbounded. "Released" in the
+  script's output means the event was sent, not that PyPI has it — which is
+  exactly what step 6 exists to close.
 - The sdist `include` in `pyproject.toml` is an allowlist — a new top-level
   directory will not ship until it is added there.
 - `__version__` in `src/pytakeoff/__init__.py` is the only version in the repo;

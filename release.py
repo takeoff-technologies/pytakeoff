@@ -7,8 +7,14 @@ picks the tag up on its own.
     python release.py                # interactive: asks what to bump and why
     python release.py minor          # skip the bump question
     python release.py --set 1.0.0rc1 # exact version
+    python release.py --republish    # current version is tagged but never reached PyPI
     python release.py --dry-run      # print every command, change nothing
     python release.py patch --notes "Fix reconnect" --yes    # non-interactive
+
+Publishing the Release is only the trigger - the release is not done until the
+workflow has run and PyPI has the version. Both are waited for and reported, and
+a release event GitHub accepted but never dispatched (it happens) is re-fired
+automatically. --republish recovers such a release without burning a version.
 
 Maintainer tool - not shipped (the sdist allowlist and wheel packages exclude it).
 """
@@ -16,18 +22,31 @@ Maintainer tool - not shipped (the sdist allowlist and wheel packages exclude it
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
+from urllib.error import URLError
+from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parent
 VERSION_FILE = ROOT / "src" / "pytakeoff" / "__init__.py"
 VERSION_RE = re.compile(r'^__version__\s*=\s*["\']([^"\']+)["\']', re.M)
 BRANCH = "main"
 RULE = "-" * 66
+
+PACKAGE = "pytakeoff"
+WORKFLOW = "publish.yml"
+#: How long to wait for GitHub to turn the release event into a workflow run.
+#: Generous on purpose: v0.2.0's dispatch took half an hour, and a release that
+#: is merely queued must never be mistaken for one that was dropped.
+RUN_WAIT_SECONDS = 1800
+#: How long to wait for the published version to appear on PyPI afterwards.
+PYPI_WAIT_SECONDS = 300
 
 DRY_RUN = False
 
@@ -37,9 +56,14 @@ class Abort(SystemExit):
         super().__init__(f"\n  {message}\n")
 
 
-def run(*args: str, capture: bool = True, check: bool = True) -> str:
-    """Run a command. Honours --dry-run for anything that mutates state."""
-    reads_only = "--list" in args  # `git tag --list` must still run under --dry-run
+def run(*args: str, capture: bool = True, check: bool = True,
+        read_only: bool = False) -> str:
+    """Run a command. Honours --dry-run for anything that mutates state.
+
+    ``read_only=True`` marks a command as safe to run under --dry-run — needed
+    for the gh queries (``gh run list``, ``gh release view``) that only look.
+    """
+    reads_only = read_only or "--list" in args  # `git tag --list` must still run
     is_gh = Path(args[0]).stem.lower() == "gh"  # args[0] may be a full path to gh.exe
     mutating = not reads_only and (
         args[:2] in {
@@ -155,6 +179,135 @@ def build_docs() -> None:
     print(f"    ok - {out.relative_to(ROOT)}")
 
 
+# --------------------------------------------------------------------------- #
+# publishing: the Release is only the trigger, so verify it actually fired
+# --------------------------------------------------------------------------- #
+
+def on_pypi(version: str) -> bool:
+    """Is this version live on PyPI?"""
+    try:
+        with urlopen(f"https://pypi.org/pypi/{PACKAGE}/json", timeout=15) as response:
+            data = json.load(response)
+    except (URLError, OSError, ValueError):
+        return False
+    return version in (data.get("releases") or {})
+
+
+def publish_runs(gh: str, tag: str) -> list[dict]:
+    """Runs of the publish workflow for this tag, newest first."""
+    out = run(gh, "run", "list", "--workflow", WORKFLOW, "--limit", "20",
+              "--json", "databaseId,status,conclusion,headBranch,createdAt",
+              read_only=True, check=False)
+    try:
+        runs = json.loads(out) if out else []
+    except ValueError:
+        return []
+    return [r for r in runs if r.get("headBranch") == tag]
+
+
+def wait_for_publish_run(gh: str, tag: str,
+                         seconds: int = RUN_WAIT_SECONDS) -> dict | None:
+    """Poll until GitHub starts a publish run for ``tag``.
+
+    Dispatch is not immediate and the lag is not bounded — v0.2.0 sat for half
+    an hour between the Release and the run. Waiting minutes, not seconds, is
+    what keeps a slow release from looking like a failed one.
+    """
+    if DRY_RUN:
+        print("    [dry-run] would wait for the publish workflow to start")
+        return {"databaseId": 0}
+    minutes = seconds // 60
+    print(f"  waiting for the publish workflow (up to {minutes} min; GitHub can "
+          f"take a while)\n    ", end="", flush=True)
+    deadline = time.monotonic() + seconds
+    while True:
+        runs = publish_runs(gh, tag)
+        if runs:
+            print(f"\n    started: run {runs[0]['databaseId']}")
+            return runs[0]
+        if time.monotonic() >= deadline:
+            print()
+            return None
+        print(".", end="", flush=True)
+        time.sleep(10)
+
+
+def refire_release(gh: str, tag: str) -> None:
+    """Re-publish the Release so GitHub emits ``release: published`` again.
+
+    Only for a release that never produced a run at all — re-firing one that is
+    merely queued would run the workflow twice and the second upload would be
+    rejected by PyPI as a duplicate.
+    """
+    print(f"  re-firing the release event for {tag}")
+    run(gh, "release", "edit", tag, "--draft")
+    time.sleep(3)
+    run(gh, "release", "edit", tag, "--draft=false")
+
+
+def wait_for_pypi(version: str, seconds: int = PYPI_WAIT_SECONDS) -> bool:
+    if DRY_RUN:
+        print(f"    [dry-run] would wait for {PACKAGE} {version} on PyPI")
+        return True
+    print(f"  waiting for {PACKAGE} {version} on PyPI (up to {seconds}s)",
+          end="", flush=True)
+    deadline = time.monotonic() + seconds
+    while True:
+        if on_pypi(version):
+            print("\n    live")
+            return True
+        if time.monotonic() >= deadline:
+            print()
+            return False
+        print(".", end="", flush=True)
+        time.sleep(10)
+
+
+def verify_published(gh: str, version: str, tag: str, *, wait: bool = True) -> int:
+    """Follow the Release through to PyPI. Returns an exit code.
+
+    Called with the Release already published. The Release is only the trigger:
+    without this, a version that never gets built looks exactly like one that
+    did, because everything the script itself does has already succeeded.
+    """
+    if not wait:
+        print(f"\n  Published the Release for {tag}; not waiting for the workflow.\n"
+              f"    check later:  gh run list --workflow {WORKFLOW}\n")
+        return 0
+
+    try:
+        started = wait_for_publish_run(gh, tag)
+    except KeyboardInterrupt:
+        # Everything up to here already happened — only the watching stops.
+        print(f"\n\n  Stopped watching. {tag} is released; the upload continues\n"
+              f"  without you.  gh run list --workflow {WORKFLOW}\n")
+        return 0
+
+    if started is None:
+        print(
+            f"\n  GitHub has not started the workflow for {tag} yet. That is usually\n"
+            f"  latency rather than failure — dispatch has taken half an hour before —\n"
+            f"  so the upload will most likely still happen on its own.\n\n"
+            f"    watch it:   gh run list --workflow {WORKFLOW}\n"
+            f"    check pypi: https://pypi.org/project/{PACKAGE}/{version}/\n\n"
+            f"  If no run has appeared much later, the event really was dropped:\n"
+            f"      python release.py --republish\n"
+        )
+        return 0  # tagged, pushed and released — not a failed release
+
+    print("  workflow running:")
+    run(gh, "run", "watch", str(started["databaseId"]), "--exit-status",
+        capture=False, check=False)
+
+    if not wait_for_pypi(version):
+        print(
+            f"\n  The workflow ran but {PACKAGE} {version} is not on PyPI yet.\n"
+            f"    gh run view {started['databaseId']} --log-failed\n"
+        )
+        return 1
+    return 0
+
+
 def changes_since_last_tag() -> tuple[str, str]:
     last = run("git", "describe", "--tags", "--abbrev=0", check=False)
     span = f"{last}..HEAD" if last else "HEAD"
@@ -225,18 +378,92 @@ def show_plan(current: str, new: str, tag: str, part: str, notes: str,
     print(f"      4. create and push tag {tag}")
     if gh:
         print("      5. publish the GitHub Release  ->  triggers the PyPI upload")
+        print("      6. follow the workflow, then confirm the version on PyPI")
+        print("         (dispatch can lag; it waits up to "
+              f"{RUN_WAIT_SECONDS // 60} min. Ctrl-C is safe -")
+        print("         the release is already out, only the watching stops)")
     else:
         print("      5. SKIP the GitHub Release - the GitHub CLI was not found")
         print("         nothing reaches PyPI until you publish it in the browser")
         print("         (install: winget install --id GitHub.cli, then reopen the shell)")
     print("\n    then, with no action from you:")
-    print("      - PyPI       the publish workflow builds and uploads")
     print("      - Read the Docs  rebuilds latest, stable follows the new tag")
     print(RULE)
 
 
 def confirm(prompt: str) -> bool:
     return input(f"\n  {prompt} [y/N] ").strip().lower() in {"y", "yes"}
+
+
+def republish(gh: str | None, notes: str, *, yes: bool, wait: bool) -> int:
+    """Finish a release that was tagged and published but never reached PyPI.
+
+    Bumps nothing and tags nothing: the current version is already committed and
+    tagged, so this only re-sends the trigger the workflow listens for.
+    """
+    version = read_version()
+    tag = f"v{version}"
+
+    if not gh:
+        raise Abort("republishing needs the GitHub CLI (gh) — see https://cli.github.com")
+    if not run("git", "tag", "--list", tag):
+        raise Abort(f"no tag {tag} — nothing to republish; cut a release instead")
+    if on_pypi(version):
+        raise Abort(f"{PACKAGE} {version} is already on PyPI — nothing to do")
+
+    released = run(gh, "release", "view", tag, "--json", "tagName",
+                   read_only=True, check=False)
+
+    # A run that already exists means the event was delivered. Re-firing then
+    # would only duplicate the upload, so watch what is there instead.
+    existing = publish_runs(gh, tag)
+    pending = [r for r in existing if r.get("status") != "completed"]
+    if pending:
+        print(f"\n  A publish run for {tag} is already {pending[0]['status']} "
+              f"(run {pending[0]['databaseId']}) — watching it instead.")
+        run(gh, "run", "watch", str(pending[0]["databaseId"]), "--exit-status",
+            capture=False, check=False)
+        return 0 if wait_for_pypi(version) else 1
+    if existing:
+        raise Abort(
+            f"a publish run for {tag} already completed "
+            f"({existing[0]['conclusion']}) but {version} is not on PyPI.\n"
+            f"  Re-firing would not help — read the log first:\n"
+            f"      gh run view {existing[0]['databaseId']} --log-failed"
+        )
+
+    print(f"\n{RULE}\n  Republish {PACKAGE} {version}\n{RULE}")
+    print(f"    tag        {tag}  (already committed and pushed)")
+    print(f"    release    {'exists — will be re-fired' if released else 'missing — will be created'}")
+    print("    version    unchanged — nothing is bumped, committed or tagged")
+    print(f"    runs       none for {tag} — the event was never delivered")
+    print(f"    then       wait for the workflow, then for {version} on PyPI")
+    print(RULE)
+
+    if DRY_RUN:
+        print("\n  -- dry run: nothing below actually happens --")
+    elif not yes and not confirm(f"Republish {version}?"):
+        print("  aborted - nothing changed\n")
+        return 1
+
+    # The tag may exist only locally if an earlier run died between the two.
+    run("git", "push", "origin", tag, check=False)
+
+    if released:
+        refire_release(gh, tag)
+    else:
+        run(gh, "release", "create", tag,
+            "--title", f"{PACKAGE} {version}", "--notes", notes or f"{PACKAGE} {version}")
+
+    code = verify_published(gh, version, tag, wait=wait)
+    if code:
+        return code
+    if not (DRY_RUN or on_pypi(version)):
+        return 0  # verify_published already explained where it stands
+
+    print(f"\n  Republished {version}.\n"
+          f"    pypi       https://pypi.org/project/{PACKAGE}/{version}/\n")
+    return 0
 
 
 # --------------------------------------------------------------------------- #
@@ -256,10 +483,22 @@ def main() -> int:
     parser.add_argument(
         "--skip-docs", action="store_true", help="do not build the docs first"
     )
+    parser.add_argument(
+        "--republish", action="store_true",
+        help="re-trigger the PyPI publish for the current version (no bump, no new tag)",
+    )
+    parser.add_argument(
+        "--no-wait", action="store_true",
+        help="do not wait for the workflow and PyPI after publishing",
+    )
     args = parser.parse_args()
     DRY_RUN = args.dry_run
 
     preflight()
+
+    if args.republish:
+        return republish(gh_path(), args.notes or "",
+                         yes=args.yes, wait=not args.no_wait)
 
     current = read_version()
     last_tag, log = changes_since_last_tag()
@@ -324,9 +563,13 @@ def main() -> int:
         return 0
 
     if gh:
+        # The Release is only the trigger — a release GitHub accepts but never
+        # dispatches leaves the version tagged and absent from PyPI, silently.
+        code = verify_published(gh, new, tag, wait=not args.no_wait)
+        if code:
+            return code
         print(
             f"\n  Released {new}.\n"
-            f"    workflow   gh run watch\n"
             f"    pypi       https://pypi.org/project/pytakeoff/{new}/\n"
             f"    docs       https://pytakeoff.readthedocs.io  (stable follows {tag})\n"
         )
