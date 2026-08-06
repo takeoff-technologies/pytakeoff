@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Union
 from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
 from . import keystore
 from .auth import AuthSession, Credentials
-from .exceptions import AuthenticationError, ConnectionClosed, NotConnectedError
+from .exceptions import (
+    AuthenticationError,
+    CommandError,
+    ConnectionClosed,
+    NotConnectedError,
+)
 from .projects import ProjectsAPI
 from .transport import ProgressCallback, WebSocketTransport
 
@@ -277,6 +283,76 @@ class TakeoffClient:
             return self._transport.call(
                 command, merged, on_progress=on_progress, timeout=resolved_timeout
             )
+
+    def available_sections(self, database: str = "uiuc") -> List[str]:
+        """Section names available in a public airfoil database.
+
+        ``database`` is ``"uiuc"`` (the UIUC coordinate database) or ``"at"``
+        (airfoiltools). Feed a name straight to
+        :meth:`Project.create_foil_section_from_database`::
+
+            names = client.available_sections("uiuc")
+            section = project.create_foil_section_from_database("uiuc", names[0])
+        """
+        result = self.call("get_available_sections", {"database": database})
+        # This command reports failure in the payload instead of erroring out.
+        if result.get("error"):
+            raise CommandError(
+                f"Could not list sections in {database!r}: {result['error']}",
+                command="get_available_sections",
+                payload=result,
+            )
+        return result.get("sections", [])
+
+    # ------------------------------------------------------------------ #
+    # File upload (REST — the one workflow that is not pure WebSocket)
+
+    def _access_token(self) -> str:
+        """A valid bearer token for REST calls, re-exchanging the key if stale."""
+        if self._credentials is None or self._credentials.expired:
+            if not self._api_key:
+                raise AuthenticationError(
+                    "No API key available — construct with api_key="
+                )
+            self._credentials = self._auth.exchange_api_key(self._api_key)
+        return self._credentials.access
+
+    def _upload_file(self, path: Union[str, Path]) -> str:
+        """Upload a local file and return the server-side path it landed on.
+
+        The file goes to your own temporary storage on the server (the same
+        place the web app's uploads go) and is referenced by later commands —
+        importing a foil section, for instance. Nothing is attached to the
+        project by the upload itself.
+        """
+        local = Path(path).expanduser()
+        if not local.is_file():
+            raise FileNotFoundError(f"No such file: {local}")
+        with local.open("rb") as handle:
+            response = requests.post(
+                f"{self.base_url}/api/upload_project_files/",
+                files={"files": (local.name, handle)},
+                headers={"Authorization": f"Bearer {self._access_token()}"},
+                timeout=self.timeout,
+            )
+        if response.status_code >= 400:
+            try:
+                detail = response.json().get("error") or response.text[:200]
+            except ValueError:
+                detail = response.text[:200]
+            raise CommandError(
+                f"Upload of {local.name} failed (HTTP {response.status_code}): {detail}",
+                command="upload_project_files",
+            )
+        files = response.json().get("files") or []
+        remote_path = files[0].get("path") if files else None
+        if not remote_path:
+            raise CommandError(
+                f"Upload of {local.name} returned no server-side path",
+                command="upload_project_files",
+            )
+        logger.debug("Uploaded %s -> %s", local, remote_path)
+        return remote_path
 
     def commands(self) -> Dict[str, Dict[str, Any]]:
         """List every command the server exposes, with its metadata.

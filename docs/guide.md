@@ -166,6 +166,88 @@ control net:
 xy = section.points()     # [[x, y], …]
 ```
 
+### Creating a section from a file or a catalogue
+
+The web app's import dialog offers three sources, and so do these three methods —
+all of them create a section, fit it, and return a handle:
+
+| Source | Method |
+| --- | --- |
+| A file on your machine | `create_foil_section_from_file(path)` |
+| A NACA designation | `create_foil_section_from_naca("2412")` |
+| UIUC / airfoiltools | `create_foil_section_from_database("uiuc", name)` |
+
+Each takes an optional `name`, plus `n_control_points` (8), `degree` (4) and
+`flip` — the same fit settings the dialog starts from.
+
+`create_foil_section_from_file()` runs the full import pipeline: upload the file,
+read its coordinates, fit a B-spline, store the section.
+
+```python
+section = project.create_foil_section_from_file("e817.dat", "tip", n_control_points=10)
+print(section.geometry())        # {"tc": 11.2, "camber": 2.9, …}
+```
+
+Point clouds (`.dat`, `.txt`, `.csv`, `.igs`) are fitted; `.arf` files already carry
+NURBS coefficients and are loaded as-is. `flip=True` mirrors the section about the
+chord, and the reader can be tuned when a file confuses the automatic leading-edge
+detection:
+
+```python
+section = project.create_foil_section_from_file(
+    "scan.igs",
+    le_te_method="min_x",       # or "auto" (default) / "max_x"
+    le_angle_threshold=40, te_angle_threshold=5,
+    igs_num_points=200, igs_spacing="cos",   # IGES sampling
+)
+```
+
+The section carries the reader's diagnostics, so you can check the fit against the
+original data:
+
+```python
+info = section.import_info
+info["n_upper"], info["n_lower"]         # points read per surface
+info["te_position"]                      # trailing edge after normalisation
+plt.plot(*zip(*info["raw_points"]), ".", label="file")
+plt.plot(*zip(*section.points()), "-", label="fitted")
+```
+
+`raw_points_discarted` holds the points the reader dropped, and `le_position` is
+added when the leading edge is recalculated (`recalculate_le=True`).
+
+The other two need no file at all — the server holds the catalogues:
+
+```python
+section = project.create_foil_section_from_naca("2412", "root")
+
+names = client.available_sections("uiuc")     # or "at" for airfoiltools
+section = project.create_foil_section_from_database("uiuc", names[0])
+```
+
+Whichever source you use, the result is a normal {class}`~pytakeoff.FoilSection` —
+read it, edit it, analyse it like any other.
+
+### Exporting a section
+
+```python
+section.export("dat", "exports/")            # -> exports/main.dat (Path returned)
+data = section.export("arf")                 # no path -> bytes
+project.export_foil_sections("dxf", "exports/")   # every section, as a zip
+```
+
+Formats: `arf` (NURBS coefficients), `dat` (coordinates), `json` (the full sailfish
+entity), `iges`, `geo`, `dxf`, `svg`. `n_points` sets the sampling for the sampled
+formats, and CAD output can be placed in 3D:
+
+```python
+section.export("dxf", "exports/tip.dxf", unit="MM",
+               le_point=[0, 0, 0], te_point=[0.25, 0, 0], te_thickness=0.0005)
+```
+
+Exporting is gated by your plan, so unlike reading and editing it can raise
+`CommandError` — see [Errors worth catching](#errors-worth-catching).
+
 ### Putting it together
 
 ```python

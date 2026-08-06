@@ -84,7 +84,7 @@ Runnable scripts in [`examples/`](examples/), numbered in learning order:
 1. [`01_create_api_key.py`](examples/01_create_api_key.py) — one-time setup: create an API key from the terminal (or use the GUI) and copy it into your scripts.
 2. [`02_connect.py`](examples/02_connect.py) — connect and print who you are.
 3. [`03_projects.py`](examples/03_projects.py) — list your projects and show the currently open one (`client.projects.current()`).
-4. [`04_foil_section.py`](examples/04_foil_section.py) — the high-level `FoilSection` API: get/set control points, geometric parameters, structural parameters.
+4. [`04_foil_section.py`](examples/04_foil_section.py) — the high-level `FoilSection` API: get/set control points, geometric and structural parameters, then create a section from NACA, export it and import it back.
 5. [`05_polar_analysis.py`](examples/05_polar_analysis.py) — 2D analysis: configure a sweep, run it, work with the raw numbers (incl. chordwise Cp).
 6. [`06_optimization.py`](examples/06_optimization.py) — 2D optimization: configure objectives/constraints, run with progress, inspect the result.
 
@@ -107,6 +107,23 @@ struct = section.structure()       # {"area", "Ixx", "SMx", "J", "centroid"(read
 section.set_structure(area=struct["area"] * 1.1)
 
 xy = section.points()              # the computed outline coordinates
+```
+
+Sections can also come from a file or a catalogue, and go back out again — the same
+import and export the web app offers:
+
+```python
+# from a file: .dat/.txt/.csv/.igs point clouds are fitted, .arf loaded as-is
+section = project.create_foil_section_from_file("e817.dat", "tip", n_control_points=10)
+section.import_info                # what the reader saw: point counts, TE, raw points
+
+# no file needed for the standard catalogues
+section = project.create_foil_section_from_naca("2412", "root")
+section = project.create_foil_section_from_database("uiuc", client.available_sections("uiuc")[0])
+
+# export: arf, dat, json, iges, geo, dxf, svg
+section.export("dat", "exports/")            # -> exports/tip.dat
+project.export_foil_sections("dxf", "exports/")   # every section, as a zip
 ```
 
 ## 2D analysis

@@ -7,16 +7,42 @@ not covered can always be performed with a raw command.
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from .analysis import Analysis2D
 from .exceptions import CommandError
-from .foil_sections import FoilSection
+from .foil_sections import FoilSection, deliver_export, export_payload
 from .optimizations import Optimization2D
 from .transport import ProgressCallback
 
 if TYPE_CHECKING:  # pragma: no cover
     from .client import TakeoffClient
+
+#: Section file types the server can read: point clouds, plus ``.arf`` (NURBS
+#: coefficients, loaded directly instead of fitted).
+SECTION_FILE_SUFFIXES = (".dat", ".txt", ".csv", ".igs", ".arf")
+
+#: B-spline fit defaults, the same ones the web app's import form starts from.
+DEFAULT_CONTROL_POINTS = 8
+DEFAULT_DEGREE = 4
+
+#: ``database`` argument -> (server source_type, payload key for the name)
+_SECTION_DATABASES = {
+    "uiuc": ("uiuc", "uiuc_name"),
+    "at": ("airfoiltools", "airfoiltools_name"),
+    "airfoiltools": ("airfoiltools", "airfoiltools_name"),
+}
+
+#: python kwarg -> server key, options for reading a section file
+_IMPORT_OPTION_KEYS = {
+    "le_te_method": "le_te_method",
+    "le_angle_threshold": "le_angle_threshold",
+    "te_angle_threshold": "te_angle_threshold",
+    "igs_num_points": "igs_num_points",
+    "igs_spacing": "igs_spacing",
+    "recalculate_le": "recalculate_leadingedge",
+}
 
 
 def _snake(entity_type: str) -> str:
@@ -277,6 +303,225 @@ class Project:
         if name is None and id is None:
             raise ValueError("Pass a foil section name or id=")
         return self.delete_entity("FoilSection", id=id, name=name)
+
+    # ------------------------------------------------------------------ #
+    # Creating sections from a file or an airfoil database
+
+    def _fit_new_section(
+        self,
+        name: Optional[str],
+        source: Dict[str, Any],
+        *,
+        n_control_points: int = DEFAULT_CONTROL_POINTS,
+        degree: int = DEFAULT_DEGREE,
+        flip: bool = False,
+    ) -> FoilSection:
+        """Create a section, fit it from ``source``, and store the fitted shape.
+
+        The fit command rebuilds the section server-side but does not persist
+        it, so the resulting control net is written back with a normal update —
+        that is what marks the project changed and refreshes an open web app.
+        """
+        section = self.create_foil_section(name)
+        # Both values are always sent: the web app sends them on every fit, and
+        # the server's "not given" fallback is a path it therefore never takes.
+        payload: Dict[str, Any] = {
+            "foil_section_id": section.id,
+            "num_ctrlpts": int(n_control_points),
+            "degree": int(degree),
+            "flip_section": bool(flip),
+            **source,
+        }
+        try:
+            fit = self._client.call("fit_foil_section_from_source", payload)
+            self.update_entity(
+                "FoilSection",
+                {
+                    "id": section.id,
+                    "foil_section_geometry": {
+                        "upper_coefs": fit["upper_coefs"],
+                        "lower_coefs": fit["lower_coefs"],
+                    },
+                },
+            )
+        except Exception:
+            # Do not leave a half-built section behind on a failed fit.
+            try:
+                self.delete_foil_section(id=section.id)
+            except Exception:  # pragma: no cover - cleanup is best effort
+                pass
+            raise
+        return section
+
+    def create_foil_section_from_file(
+        self,
+        path: Union[str, Path],
+        name: Optional[str] = None,
+        *,
+        n_control_points: int = DEFAULT_CONTROL_POINTS,
+        degree: int = DEFAULT_DEGREE,
+        flip: bool = False,
+        le_te_method: Optional[str] = None,
+        le_angle_threshold: Optional[float] = None,
+        te_angle_threshold: Optional[float] = None,
+        igs_num_points: Optional[int] = None,
+        igs_spacing: Optional[str] = None,
+        recalculate_le: Optional[bool] = None,
+    ) -> FoilSection:
+        """Add a section read from a file on your machine.
+
+        Same pipeline as the web app's import: the file is uploaded to your
+        temporary storage on the server, read into coordinates, fitted with a
+        B-spline, and stored as a new foil section::
+
+            section = project.create_foil_section_from_file(
+                "e817.dat", "tip", n_control_points=10)
+            print(section.geometry())
+
+        Accepts point clouds (``.dat``, ``.txt``, ``.csv``, ``.igs``) and
+        ``.arf`` files, which already carry NURBS coefficients and are loaded
+        as-is (no fitting, and the options below do not apply).
+
+        ``n_control_points`` and ``degree`` control the fit; ``flip=True``
+        mirrors the section about the chord. The rest tune how the raw points
+        are read — ``le_te_method`` (``"auto"``, ``"min_x"``, ``"max_x"``),
+        ``le_angle_threshold`` / ``te_angle_threshold``, ``recalculate_le``,
+        and ``igs_num_points`` / ``igs_spacing`` for IGES files.
+
+        The returned section carries the reader's diagnostics in
+        :attr:`FoilSection.import_info` — point counts, trailing edge and the
+        raw file points, handy to plot against the fitted outline.
+
+        See also :meth:`create_foil_section_from_naca` and
+        :meth:`create_foil_section_from_database`, the other two sources the
+        web app's import dialog offers.
+        """
+        local = Path(path).expanduser()
+        suffix = local.suffix.lower()
+        if suffix not in SECTION_FILE_SUFFIXES:
+            raise ValueError(
+                f"{local.name}: sections are read from "
+                f"{', '.join(SECTION_FILE_SUFFIXES)} files"
+            )
+
+        remote_path = self._client._upload_file(local)
+        source = {"source_type": "fit from file", "file_path": remote_path}
+        requested = {
+            "le_te_method": le_te_method,
+            "le_angle_threshold": le_angle_threshold,
+            "te_angle_threshold": te_angle_threshold,
+            "igs_num_points": igs_num_points,
+            "igs_spacing": igs_spacing,
+            "recalculate_le": recalculate_le,
+        }
+        options = {
+            _IMPORT_OPTION_KEYS[key]: value
+            for key, value in requested.items()
+            if value is not None
+        }
+
+        import_info = None
+        if suffix != ".arf":
+            # Reading the file also caches its coordinates server-side for the
+            # fit that follows, so these two calls belong back to back: the
+            # cache is not keyed by file, and a preview of another file (from a
+            # script or an open web app) would otherwise be fitted instead.
+            preview = self._client.call(
+                "preview_foil_section_points", {**source, **options}
+            )
+            if preview.get("error"):
+                raise CommandError(
+                    f"Could not read {local.name}: {preview['error']}",
+                    command="preview_foil_section_points",
+                    payload=preview,
+                )
+            import_info = preview.get("import_info")
+
+        section = self._fit_new_section(
+            name,
+            source,
+            n_control_points=n_control_points,
+            degree=degree,
+            flip=flip,
+        )
+        section.import_info = import_info
+        return section
+
+    def create_foil_section_from_naca(
+        self,
+        designation: str,
+        name: Optional[str] = None,
+        *,
+        n_control_points: int = DEFAULT_CONTROL_POINTS,
+        degree: int = DEFAULT_DEGREE,
+        flip: bool = False,
+    ) -> FoilSection:
+        """Add a section generated from a NACA designation — no file needed.
+
+        Fitted with ``n_control_points`` control points of ``degree``, the same
+        defaults the web app starts from::
+
+            section = project.create_foil_section_from_naca("2412", "root")
+        """
+        return self._fit_new_section(
+            name,
+            {"source_type": "naca", "naca_name": str(designation)},
+            n_control_points=n_control_points,
+            degree=degree,
+            flip=flip,
+        )
+
+    def create_foil_section_from_database(
+        self,
+        database: str,
+        section: str,
+        name: Optional[str] = None,
+        *,
+        n_control_points: int = DEFAULT_CONTROL_POINTS,
+        degree: int = DEFAULT_DEGREE,
+        flip: bool = False,
+    ) -> FoilSection:
+        """Add a section from a public airfoil database — no file needed.
+
+        ``database`` is ``"uiuc"`` or ``"at"`` (airfoiltools); ``section`` is a
+        name from :meth:`TakeoffClient.available_sections`::
+
+            names = client.available_sections("uiuc")
+            section = project.create_foil_section_from_database("uiuc", names[0])
+        """
+        entry = _SECTION_DATABASES.get(str(database).lower())
+        if entry is None:
+            raise ValueError(
+                f"Unknown database {database!r}; known: "
+                f"{', '.join(sorted(_SECTION_DATABASES))}"
+            )
+        source_type, name_key = entry
+        return self._fit_new_section(
+            name,
+            {"source_type": source_type, name_key: section},
+            n_control_points=n_control_points,
+            degree=degree,
+            flip=flip,
+        )
+
+    def export_foil_sections(
+        self,
+        format: str = "dat",
+        path: Optional[Union[str, Path]] = None,
+        **options: Any,
+    ) -> Any:
+        """Export **every** foil section in the project, as a zip archive.
+
+        Same formats and options as :meth:`FoilSection.export`, which exports a
+        single section. Without ``path`` the zip is returned as ``bytes``;
+        with one it is written there and the path is returned::
+
+            project.export_foil_sections("dat", "exports/")   # -> .../all_sections.zip
+        """
+        result = self._client.call(
+            "export_foil_sections", export_payload("All", format, options)
+        )
+        return deliver_export(result, path)
 
     def analysis_2d(self, **params: Any) -> Analysis2D:
         """A configured 2D polar analysis over the visible foil sections.

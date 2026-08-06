@@ -21,12 +21,47 @@ differ slightly from the requested one.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence
+import base64
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union
 
 from .exceptions import CommandError
 
 if TYPE_CHECKING:  # pragma: no cover
     from .client import TakeoffClient
+
+#: Formats ``export_foil_sections`` understands.
+EXPORT_FORMATS = ("arf", "dat", "json", "iges", "geo", "dxf", "svg")
+
+
+def deliver_export(result: Dict[str, Any], path: Optional[Union[str, Path]]) -> Any:
+    """Turn an ``export_foil_sections`` response into bytes or a written file.
+
+    With ``path=None`` the decoded file content is returned. Otherwise it is
+    written to ``path`` (a directory keeps the server's filename) and the
+    :class:`~pathlib.Path` written is returned.
+    """
+    content = base64.b64decode(result.get("content") or "")
+    if path is None:
+        return content
+    target = Path(path).expanduser()
+    if target.is_dir():
+        target = target / (result.get("filename") or "export")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(content)
+    return target
+
+
+def export_payload(
+    section_name: str, format: str, options: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Validate a format and build the ``export_foil_sections`` payload."""
+    fmt = str(format).lower()
+    if fmt not in EXPORT_FORMATS:
+        raise ValueError(
+            f"Unknown export format {format!r}; known: {', '.join(EXPORT_FORMATS)}"
+        )
+    return {"section_name": section_name, "format": fmt, **options}
 
 #: python kwarg -> server key, geometric parameters (group "geometry_properties")
 _GEOMETRY_KEYS = {
@@ -53,6 +88,11 @@ class FoilSection:
         self._client = client
         self.id: Optional[str] = data.get("id")
         self.name: Optional[str] = data.get("name")
+        #: Import diagnostics, set only on sections created by
+        #: :meth:`Project.create_foil_section_from_file` (``None`` otherwise). Carries the
+        #: point counts, the ``te_position``, and the ``raw_points`` read from
+        #: the file, so you can plot the fit against the original data.
+        self.import_info: Optional[Dict[str, Any]] = None
 
     def __repr__(self) -> str:
         return f"FoilSection({self.name!r}, id={self.id!r})"
@@ -238,3 +278,37 @@ class FoilSection:
     def points(self) -> Any:
         """The section's outline coordinates (computed from the B-spline)."""
         return self._get(["points"]).get("foil_section_geometry", {}).get("points")
+
+    # ------------------------------------------------------------------ #
+    # Export
+
+    def export(
+        self,
+        format: str = "dat",
+        path: Optional[Union[str, Path]] = None,
+        **options: Any,
+    ) -> Any:
+        """Export this section to a file, exactly as the web app does.
+
+        ``format`` is one of ``arf`` (NURBS coefficients), ``dat``
+        (coordinates), ``json`` (the full sailfish entity), ``iges``, ``geo``,
+        ``dxf``, ``svg``. Without ``path`` the file content is returned as
+        ``bytes``; with one it is written there (a directory keeps the server's
+        filename) and the :class:`~pathlib.Path` is returned::
+
+            section.export("dat", "sections/")           # -> .../main.dat
+            data = section.export("arf")                 # -> bytes
+
+        ``options`` are passed straight through: ``n_points`` for the sampled
+        formats (dat/geo/svg), and ``unit`` / ``le_point`` / ``te_point`` /
+        ``te_thickness`` to place the section in 3D for CAD output (dxf/iges).
+
+        Exporting is gated by your plan, so it can raise
+        :class:`pytakeoff.CommandError` where reading and editing do not.
+        Sections are identified by **name** here, so an exact duplicate name in
+        the project makes the choice arbitrary.
+        """
+        result = self._client.call(
+            "export_foil_sections", export_payload(self.name or "", format, options)
+        )
+        return deliver_export(result, path)
